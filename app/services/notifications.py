@@ -56,13 +56,13 @@ def init_firebase():
     if not _firebase_initialized:
         try:
             creds_json = os.environ.get("FIREBASE_CREDENTIALS_JSON")
-            logger.info("firebase_init_attempt", 
-                       has_json_var=creds_json is not None,
-                       json_length=len(creds_json) if creds_json else 0)
             if creds_json:
                 cred = credentials.Certificate(json.loads(creds_json))
             else:
-                cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
+                # Render secret file mount point, falls back to local dev path
+                secret_path = "/etc/secrets/firebase-service-account.json"
+                cred_path = secret_path if os.path.exists(secret_path) else settings.FIREBASE_CREDENTIALS_PATH
+                cred = credentials.Certificate(cred_path)
             firebase_admin.initialize_app(cred)
             _firebase_initialized = True
             logger.info("firebase_initialized")
