@@ -1,0 +1,114 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL with PostGIS ──────────────────────────────────────────────────
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: kabale_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kabale_transport
+      POSTGRES_USER: kabale_user
+      POSTGRES_PASSWORD: kabale_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kabale_user -d kabale_transport"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: kabale_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Backend ──────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      target: production
+    container_name: kabale_api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://kabale_user:kabale_password@db:5432/kabale_transport
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./firebase-service-account.json:/app/firebase-service-account.json:ro
+
+  # ── Celery Worker ─────────────────────────────────────────────────────────────
+  celery_worker:
+    build:
+      context: .
+      target: production
+    container_name: kabale_celery
+    restart: unless-stopped
+    command: celery -A app.tasks.dispatch_tasks.celery_app worker --loglevel=info --concurrency=4
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://kabale_user:kabale_password@db:5432/kabale_transport
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Celery Beat (Scheduled Tasks) ─────────────────────────────────────────────
+  celery_beat:
+    build:
+      context: .
+      target: production
+    container_name: kabale_beat
+    restart: unless-stopped
+    command: celery -A app.tasks.dispatch_tasks.celery_app beat --loglevel=info
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://kabale_user:kabale_password@db:5432/kabale_transport
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+
+  # ── Celery Flower (Task Monitor - Dev Only) ───────────────────────────────────
+  flower:
+    build:
+      context: .
+      target: production
+    container_name: kabale_flower
+    restart: unless-stopped
+    command: celery -A app.tasks.dispatch_tasks.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+    profiles:
+      - dev   # only starts with: docker compose --profile dev up
+
+volumes:
+  postgres_data:
+  redis_data:

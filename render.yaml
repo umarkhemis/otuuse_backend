@@ -1,0 +1,78 @@
+services:
+  - type: web
+    name: otuuse-transport-api
+    env: docker
+    plan: free
+    region: frankfurt          # closest available region to Uganda
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Override the Dockerfile CMD - free tier has 0.1 CPU / 512 MB RAM,
+    # so 1 worker is correct here. Bump to 4 after upgrading to paid.
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips "*"
+    envVars:
+      # ── App ──────────────────────────────────────────────────────────────────
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: APP_NAME
+        value: Otuuse Transport API
+
+      # ── Security (set in Render dashboard - never commit these) ───────────────
+      - key: SECRET_KEY
+        generateValue: true      # Render generates a secure random value
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "1440"
+      - key: REFRESH_TOKEN_EXPIRE_DAYS
+        value: "30"
+
+      # ── Database (Neon - set in Render dashboard) ─────────────────────────────
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_POOL_SIZE
+        value: "5"               # keep low on free tier
+      - key: DATABASE_MAX_OVERFLOW
+        value: "2"
+      - key: DATABASE_POOL_TIMEOUT
+        value: "30"
+
+      # ── Redis (Upstash - set in Render dashboard) ─────────────────────────────
+      - key: REDIS_URL
+        sync: false              # set to your Upstash rediss:// URL
+      - key: REDIS_DRIVER_LOCATION_TTL
+        value: "30"
+      - key: REDIS_SESSION_TTL
+        value: "86400"
+
+      # ── Firebase (set in Render dashboard) ───────────────────────────────────
+      # Paste the entire contents of firebase-service-account.json as one line
+      - key: FIREBASE_CREDENTIALS_JSON
+        sync: false
+
+      # ── PesaPal (set in Render dashboard) ────────────────────────────────────
+      - key: PESAPAL_CONSUMER_KEY
+        sync: false
+      - key: PESAPAL_CONSUMER_SECRET
+        sync: false
+      - key: PESAPAL_BASE_URL
+        value: https://cybqa.pesapal.com/pesapalv3   # switch to pay.pesapal.com/v3 for live
+      - key: PESAPAL_IPN_URL
+        sync: false              # set AFTER Render gives you your public URL
+      - key: PESAPAL_CALLBACK_URL
+        sync: false              # set AFTER Render gives you your public URL
+
+      # ── Routing / AI ─────────────────────────────────────────────────────────
+      - key: ORS_BASE_URL
+        value: https://api.openrouteservice.org/v2
+      - key: ORS_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+
+      # ── Dispatch ─────────────────────────────────────────────────────────────
+      - key: DISPATCH_MAX_DRIVER_SEARCH_RADIUS_KM
+        value: "5"
+      - key: DISPATCH_DRIVER_ACCEPTANCE_TIMEOUT_SECONDS
+        value: "30"
