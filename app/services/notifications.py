@@ -25,21 +25,40 @@ logger = get_logger(__name__)
 _firebase_initialized = False
 
 
-def init_firebase():
-    """
-    Initialise Firebase Admin SDK.
+# def init_firebase():
+#     """
+#     Initialise Firebase Admin SDK.
 
-    Two credential strategies, tried in order:
-    1. FIREBASE_CREDENTIALS_JSON env var  - used on Render and other cloud
-       hosts where we can't guarantee a writable filesystem or commit secrets.
-       Set this to the full contents of your service-account JSON file.
-    2. FIREBASE_CREDENTIALS_PATH setting  - used locally (defaults to
-       'firebase-service-account.json' in the project root).
-    """
+#     Two credential strategies, tried in order:
+#     1. FIREBASE_CREDENTIALS_JSON env var  - used on Render and other cloud
+#        hosts where we can't guarantee a writable filesystem or commit secrets.
+#        Set this to the full contents of your service-account JSON file.
+#     2. FIREBASE_CREDENTIALS_PATH setting  - used locally (defaults to
+#        'firebase-service-account.json' in the project root).
+#     """
+#     global _firebase_initialized
+#     if not _firebase_initialized:
+#         try:
+#             creds_json = os.environ.get("FIREBASE_CREDENTIALS_JSON")
+#             if creds_json:
+#                 cred = credentials.Certificate(json.loads(creds_json))
+#             else:
+#                 cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
+#             firebase_admin.initialize_app(cred)
+#             _firebase_initialized = True
+#             logger.info("firebase_initialized")
+#         except Exception as e:
+#             logger.error("firebase_init_failed", error=str(e))
+
+
+def init_firebase():
     global _firebase_initialized
     if not _firebase_initialized:
         try:
             creds_json = os.environ.get("FIREBASE_CREDENTIALS_JSON")
+            logger.info("firebase_init_attempt", 
+                       has_json_var=creds_json is not None,
+                       json_length=len(creds_json) if creds_json else 0)
             if creds_json:
                 cred = credentials.Certificate(json.loads(creds_json))
             else:
