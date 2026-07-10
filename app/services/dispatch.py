@@ -234,12 +234,19 @@ class DispatchService:
             db=db,
         )
 
-        # Schedule timeout check via Celery
-        from app.tasks.dispatch_tasks import check_driver_acceptance_timeout
-        check_driver_acceptance_timeout.apply_async(
-            args=[str(ride_id)],
-            countdown=settings.DISPATCH_DRIVER_ACCEPTANCE_TIMEOUT_SECONDS + 5,
-        )
+        # Schedule timeout check via Celery (best-effort - no worker on free tier)
+        try:
+            from app.tasks.dispatch_tasks import check_driver_acceptance_timeout
+            check_driver_acceptance_timeout.apply_async(
+                args=[str(ride_id)],
+                countdown=settings.DISPATCH_DRIVER_ACCEPTANCE_TIMEOUT_SECONDS + 5,
+            )
+        except Exception as _celery_err:
+            logger.warning(
+                "celery_task_skipped",
+                error=str(_celery_err),
+                ride_id=str(ride_id),
+            )
 
         logger.info(
             "ride_dispatched",

@@ -20,10 +20,17 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 # ── Celery App ─────────────────────────────────────────────────────────────────
+def _celery_url(url: str) -> str:
+    """Celery requires ssl_cert_reqs param for rediss:// URLs (Upstash)."""
+    if url.startswith("rediss://") and "ssl_cert_reqs" not in url:
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}ssl_cert_reqs=CERT_NONE"
+    return url
+
 celery_app = Celery(
     "kabale_transport",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL,
+    broker=_celery_url(settings.REDIS_URL),
+    backend=_celery_url(settings.REDIS_URL),
 )
 
 celery_app.conf.update(
