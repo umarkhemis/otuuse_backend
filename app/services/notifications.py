@@ -193,6 +193,19 @@ class NotificationService:
             data={"type": "wallet_credit", "amount_ugx": amount_ugx},
         )
 
+
+    async def notify_driver_passenger_confirmed(
+        self, driver_user_id: UUID, ride_id: UUID, db: AsyncSession
+    ):
+        """Tell the driver the passenger confirmed - proceed to pickup."""
+        tokens = await self._get_user_tokens(driver_user_id, db)
+        await self._send(
+            tokens=tokens,
+            title="Passenger Confirmed!",
+            body="Your passenger confirmed the ride. Head to the pickup point now.",
+            data={"type": "passenger_confirmed", "ride_id": str(ride_id)},
+        )
+
     # ── Admin Notifications ────────────────────────────────────────────────────
 
     async def notify_admin_new_delivery(

@@ -29,6 +29,9 @@ class ChatResponse(BaseModel):
     ride_id: str | None = None
     delivery_id: str | None = None
     fare_ugx: int | None = None
+    driver_name: str | None = None
+    driver_phone: str | None = None
+    driver_plate: str | None = None
 
 
 @router.post("/message", response_model=ChatResponse)
@@ -59,11 +62,15 @@ async def send_message(
         ride_id=str(response.ride_id) if response.ride_id else None,
         delivery_id=str(response.delivery_id) if response.delivery_id else None,
         fare_ugx=response.fare_ugx,
+        driver_name=response.driver_name,
+        driver_phone=response.driver_phone,
+        driver_plate=response.driver_plate,
     )
 
 
 class ConfirmRideBody(BaseModel):
     confirmed: bool
+    ride_id: str | None = None   # required in the new driver-first flow
 
 
 @router.post("/confirm-ride")
@@ -73,56 +80,107 @@ async def confirm_ride(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Called after the agent quotes a fare and the passenger taps Confirm.
-    Creates the ride record and triggers dispatch.
+    Called after the driver accepts and the passenger taps Confirm on the fare card.
+    The ride already exists and is in ACCEPTED status at this point.
+    This endpoint simply notifies the driver that the passenger is ready.
     """
+    from app.models.models import Ride, RideStatus
+    from uuid import UUID as _UUID
+
     if not body.confirmed:
-        redis = await get_redis()
-        await redis.delete(f"pending_ride:{current_user.id}")
+        # Passenger cancelled after driver accepted - cancel the ride
+        if body.ride_id:
+            from datetime import datetime as _dt, timezone as _tz
+            from sqlalchemy import update as _update
+            await db.execute(
+                _update(Ride)
+                .where(Ride.id == _UUID(body.ride_id), Ride.passenger_id == current_user.id)
+                .values(
+                    status=RideStatus.CANCELLED,
+                    cancellation_reason="passenger_cancelled_after_driver_accepted",
+                    cancelled_at=_dt.now(_tz.utc),
+                )
+            )
+            await db.commit()
         return {"message": "Ride cancelled"}
 
-    # Retrieve pending ride data from Redis
-    redis = await get_redis()
-    raw = await redis.get(f"pending_ride:{current_user.id}")
+    if not body.ride_id:
+        raise HTTPException(status_code=400, detail="ride_id is required")
 
-    if not raw:
-        raise HTTPException(status_code=400, detail="No pending ride to confirm. Please request a new ride.")
+    ride = await db.get(Ride, _UUID(body.ride_id))
+    if not ride or ride.passenger_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Ride not found")
 
-    ride_data = json.loads(raw)
+    if ride.status != RideStatus.ACCEPTED:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot confirm: ride is in '{ride.status.value}' status. "
+                "Wait for the driver to accept first."
+            ),
+        )
 
-    # Create the ride record
-    from app.services.crud import create_ride
-    ride = await create_ride(
+    # Notify driver that passenger confirmed and to proceed to pickup
+    from app.services.notifications import notification_service
+    await notification_service.notify_driver_passenger_confirmed(
+        driver_user_id=ride.driver_id,
+        ride_id=ride.id,
         db=db,
-        passenger_id=current_user.id,
-        pickup_name=ride_data["pickup_name"],
-        dropoff_name=ride_data["dropoff_name"],
-        pickup_lat=ride_data["pickup_lat"],
-        pickup_lon=ride_data["pickup_lon"],
-        dropoff_lat=ride_data["dropoff_lat"],
-        dropoff_lon=ride_data["dropoff_lon"],
-        estimated_distance_km=ride_data["distance_km"],
-        estimated_duration_minutes=ride_data["duration_minutes"],
-        estimated_fare_ugx=ride_data["estimated_fare_ugx"],
     )
-    await db.commit()
-
-    # Clear pending ride
-    await redis.delete(f"pending_ride:{current_user.id}")
-
-    # Trigger dispatch
-    dispatched = await dispatch_service.dispatch_ride(ride_id=ride.id, db=db)
-
-    if not dispatched:
-        return {
-            "ride_id": str(ride.id),
-            "message": "Ride created but no drivers are currently available. We will assign a driver as soon as one becomes available.",
-        }
 
     return {
         "ride_id": str(ride.id),
-        "message": "Ride confirmed. A driver has been alerted and will accept shortly.",
+        "message": "Confirmed! Your driver is heading to your pickup point.",
     }
+
+
+@router.get("/ride-status/{ride_id}")
+async def get_ride_status(
+    ride_id: str,
+    current_user: Annotated[User, Depends(get_current_passenger)],
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Passenger polls this every 4 seconds after requesting a ride.
+    Returns status and driver details once the driver accepts.
+    Flutter shows the fare card only when status == 'accepted'.
+    """
+    from app.models.models import Ride, RideStatus, DriverProfile
+    from sqlalchemy import select as _select
+    from uuid import UUID as _UUID
+
+    ride = await db.get(Ride, _UUID(ride_id))
+    if not ride or ride.passenger_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Ride not found")
+
+    base: dict = {
+        "status": ride.status.value,
+        "fare_ugx": None,
+        "distance_km": None,
+        "driver_name": None,
+        "driver_phone": None,
+        "driver_plate": None,
+    }
+
+    if ride.status in [
+        RideStatus.ACCEPTED,
+        RideStatus.DRIVER_ARRIVING,
+        RideStatus.IN_PROGRESS,
+    ] and ride.driver_id:
+        driver_user = await db.get(User, ride.driver_id)
+        dp_result = await db.execute(
+            _select(DriverProfile).where(DriverProfile.user_id == ride.driver_id)
+        )
+        dp = dp_result.scalar_one_or_none()
+        base.update({
+            "fare_ugx": ride.estimated_fare_ugx,
+            "distance_km": ride.estimated_distance_km,
+            "driver_name": driver_user.name if driver_user else "Your driver",
+            "driver_phone": driver_user.phone_number if driver_user else "",
+            "driver_plate": (dp.plate_number if dp else None) or "—",
+        })
+
+    return base
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -340,6 +398,7 @@ async def get_driver_active_ride(
             "estimated_distance_km": ride.estimated_distance_km,
             "estimated_duration_minutes": ride.estimated_duration_minutes,
             "passenger_name": passenger.name if passenger else "Passenger",
+            "passenger_phone": passenger.phone_number if passenger else "",
         }
     }
 

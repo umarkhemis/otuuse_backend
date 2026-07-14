@@ -200,6 +200,7 @@ class DriverProfile(Base):
     license_doc = Column(String(500))
     registration_doc = Column(String(500))
     is_documents_verified = Column(Boolean, default=False, nullable=False)
+    plate_number = Column(String(20), nullable=True)   # vehicle plate e.g. UAX 001B
 
     # PIN for driver login (hashed)
     pin_hash = Column(String(200), nullable=False)

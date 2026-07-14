@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     DISPATCH_AUTO_START_DELAY_SECONDS: int = 180
     DISPATCH_AUTO_COMPLETE_STATIONARY_SECONDS: int = 120
 
+    # Operating hours (East Africa Time = UTC+3)
+    OPERATION_START_HOUR: int = 6    # 6am EAT
+    OPERATION_END_HOUR: int = 22     # 10pm EAT
+
     # ── Rate Limiting ──────────────────────────────────────────────────────────
     RATE_LIMIT_CHAT_PER_MINUTE: int = 30
     RATE_LIMIT_AUTH_PER_MINUTE: int = 5

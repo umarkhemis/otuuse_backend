@@ -67,6 +67,9 @@ class AgentResponse:
     ride_id: Optional[UUID] = None
     delivery_id: Optional[UUID] = None
     fare_ugx: Optional[int] = None
+    driver_name: Optional[str] = None    # shown on fare confirm card
+    driver_phone: Optional[str] = None  # passenger can call driver on arrival
+    driver_plate: Optional[str] = None  # helps passenger identify the bike
 
 
 # ── Agent ──────────────────────────────────────────────────────────────────────
@@ -345,63 +348,85 @@ Return ONLY this JSON structure, nothing else:
             )
             return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
-        # Step 4: Check driver availability
-        available_count = await dispatch_service.count_available_drivers(
-            pickup_lat=pickup_coords.latitude,
-            pickup_lon=pickup_coords.longitude,
-            db=db,
-        )
-
-        if available_count == 0:
+        # Step 4: Check operation hours (EAT = UTC+3)
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        _eat_now = _dt.now(_tz.utc) + _td(hours=3)
+        if not (settings.OPERATION_START_HOUR <= _eat_now.hour < settings.OPERATION_END_HOUR):
             reply = await self._generate_response(
                 history=history,
-                context_note=f"No drivers are currently available near {extracted.pickup_name}. Apologise and let the user know we are checking. They can try again in a few minutes.",
+                context_note=(
+                    f"We are currently outside operating hours. "
+                    f"The service runs from {settings.OPERATION_START_HOUR}:00am to "
+                    f"{settings.OPERATION_END_HOUR}:00pm East Africa Time. "
+                    "Apologise warmly and let the passenger know when they can book."
+                ),
                 user_message=user_message,
             )
             return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
-        # Step 5: Save pending ride and quote fare
-        # Store ride details in Redis temporarily - confirmed when user says yes
-        ride_context = {
-            "pickup_name": extracted.pickup_name,
-            "dropoff_name": extracted.dropoff_name,
-            "pickup_lat": pickup_coords.latitude,
-            "pickup_lon": pickup_coords.longitude,
-            "dropoff_lat": dropoff_coords.latitude,
-            "dropoff_lon": dropoff_coords.longitude,
-            "distance_km": route.distance_km,
-            "duration_minutes": route.duration_minutes,
-            "estimated_fare_ugx": route.estimated_fare_ugx,
-        }
+        # Step 5: Create ride record and dispatch to driver immediately.
+        # The fare card is NOT shown to the passenger yet - it only appears
+        # after the driver accepts. This prevents disappointed passengers.
+        from app.services import crud as _crud
+        from app.models.models import Ride as _Ride, RideStatus as _RS
+        from sqlalchemy import update as _update
 
-        from app.services.cache import get_redis
-        redis = await get_redis()
-        await redis.setex(
-            f"pending_ride:{user_id}",
-            300,   # 5 minutes to confirm
-            json.dumps(ride_context),
+        ride = await _crud.create_ride(
+            db=db,
+            passenger_id=user_id,
+            pickup_name=extracted.pickup_name,
+            dropoff_name=extracted.dropoff_name,
+            pickup_lat=pickup_coords.latitude,
+            pickup_lon=pickup_coords.longitude,
+            dropoff_lat=dropoff_coords.latitude,
+            dropoff_lon=dropoff_coords.longitude,
+            estimated_distance_km=route.distance_km,
+            estimated_duration_minutes=route.duration_minutes,
+            estimated_fare_ugx=route.estimated_fare_ugx,
         )
+        await db.commit()
 
+        dispatched = await dispatch_service.dispatch_ride(ride_id=ride.id, db=db)
+
+        if not dispatched:
+            from datetime import datetime as _dt2, timezone as _tz2
+            await db.execute(
+                _update(_Ride).where(_Ride.id == ride.id).values(
+                    status=_RS.CANCELLED,
+                    cancellation_reason="no_drivers_available",
+                    cancelled_at=_dt2.now(_tz2.utc),
+                )
+            )
+            await db.commit()
+            logger.warning("no_drivers_available_at_dispatch",
+                           pickup=extracted.pickup_name, user_id=str(user_id))
+            reply = await self._generate_response(
+                history=history,
+                context_note=(
+                    f"No drivers are currently available near {extracted.pickup_name}. "
+                    "Apologise warmly and ask the passenger to try again in a few minutes."
+                ),
+                user_message=user_message,
+            )
+            return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
+
+        # Driver has been alerted - tell the passenger to hold on.
+        # The fare card appears ONLY after the driver accepts (passenger polls /ride-status).
         context_note = (
-            f"Fare quote ready. Route: {extracted.pickup_name} to {extracted.dropoff_name}. "
-            f"Distance: {route.distance_km}km. "
-            f"Estimated time: {round(route.duration_minutes)} minutes. "
-            f"Fare: {route.estimated_fare_ugx:,} UGX. "
-            f"Drivers available: {available_count}. "
-            "Quote this fare clearly and ask the user to confirm. "
-            "Tell them a driver will be assigned once they confirm."
+            "A driver has been found and notified. "
+            "Tell the passenger warmly to hold on while the driver confirms. "
+            "Keep it very brief - one sentence. "
+            "Do NOT mention the fare or driver details yet."
         )
-
         reply = await self._generate_response(
             history=history,
             context_note=context_note,
             user_message=user_message,
         )
-
         return AgentResponse(
             message=reply,
             intent=MessageIntent.RIDE_REQUEST,
-            fare_ugx=route.estimated_fare_ugx,
+            ride_id=ride.id,
         )
 
     async def _handle_delivery_request(

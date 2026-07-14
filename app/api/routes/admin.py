@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,6 +44,7 @@ class OnboardDriverBody(BaseModel):
     name: str
     initial_pin: str = Field(..., min_length=4, max_length=6)
     subscription_months: int = Field(default=1, ge=1, le=12)
+    plate_number: Optional[str] = Field(default=None, max_length=20)
 
 
 @router.post("/drivers/onboard")
@@ -102,6 +103,7 @@ async def onboard_driver(
         subscription_expires_at=subscription_expires,
         pin_hash=hash_pin(body.initial_pin),
         invite_code=invite_code,
+        plate_number=body.plate_number,
         onboarded_at=datetime.now(timezone.utc),
         onboarded_by_admin_id=current_admin.id,
         is_documents_verified=False,
@@ -160,6 +162,7 @@ async def list_drivers(
             "subscription_expires_at": profile.subscription_expires_at.isoformat() if profile.subscription_expires_at else None,
             "wallet_balance_ugx": user.wallet_balance_ugx,
             "documents_verified": profile.is_documents_verified,
+            "plate_number": profile.plate_number,
         }
         for user, profile in rows
     ]
@@ -554,6 +557,92 @@ async def reply_to_delivery(
         "agent_relay": agent_reply,
     }
 
+
+
+# ── Admin Document Upload ─────────────────────────────────────────────────────
+
+@router.post("/drivers/{driver_id}/upload-document")
+async def admin_upload_driver_document(
+    driver_id: str,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: AsyncSession = Depends(get_db),
+    doc_type: str = Form(...),   # national_id | license | registration
+    file: UploadFile = File(...),
+):
+    """
+    Admin uploads a verification document on behalf of a driver.
+    Useful during in-person onboarding where admin collects documents directly.
+    Re-uploading resets is_documents_verified - admin must re-verify.
+    """
+    from fastapi import File, Form, UploadFile
+
+    valid_types = {"national_id", "license", "registration"}
+    if doc_type not in valid_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"doc_type must be one of {sorted(valid_types)}"
+        )
+
+    allowed_extensions = {".jpg", ".jpeg", ".png", ".pdf"}
+    ext = (
+        "." + file.filename.rsplit(".", 1)[-1].lower()
+        if file.filename and "." in file.filename
+        else ""
+    )
+    if ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail="Only JPG, PNG, or PDF files are accepted"
+        )
+
+    profile_result = await db.execute(
+        select(DriverProfile).where(DriverProfile.user_id == uuid.UUID(driver_id))
+    )
+    profile = profile_result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Driver profile not found")
+
+    content_bytes = await file.read()
+    from app.core.config import settings as _settings
+    max_bytes = _settings.STORAGE_MAX_UPLOAD_MB * 1024 * 1024
+    if len(content_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File exceeds {_settings.STORAGE_MAX_UPLOAD_MB}MB limit"
+        )
+
+    from app.services.storage import storage_service
+    key = await storage_service.upload(
+        driver_user_id=driver_id,
+        doc_type=doc_type,
+        filename=file.filename,
+        content=content_bytes,
+    )
+
+    column_map = {
+        "national_id": "national_id_doc",
+        "license": "license_doc",
+        "registration": "registration_doc",
+    }
+    await db.execute(
+        update(DriverProfile)
+        .where(DriverProfile.id == profile.id)
+        .values(**{column_map[doc_type]: key, "is_documents_verified": False})
+    )
+    await log_admin_action(
+        db,
+        admin_id=current_admin.id,
+        action="upload_driver_document",
+        target_type="driver",
+        target_id=driver_id,
+        details=f"doc_type={doc_type}",
+    )
+    await db.commit()
+
+    return {
+        "message": f"{doc_type.replace('_', ' ')} uploaded by admin. Pending verification.",
+        "storage_key": key,
+    }
 
 # ── Dashboard ──────────────────────────────────────────────────────────────────
 

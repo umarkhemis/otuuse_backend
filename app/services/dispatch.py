@@ -148,6 +148,7 @@ class DispatchService:
         self,
         ride_id: UUID,
         db: AsyncSession,
+        pre_selected_driver_id: Optional[UUID] = None,
     ) -> bool:
         """
         Find the best available driver and alert them.
@@ -186,12 +187,32 @@ class DispatchService:
         # Get list of already-tried drivers for this ride (for reassignment)
         exclude_ids = await self._get_tried_driver_ids(ride_id)
 
-        driver = await self.find_best_driver(
-            pickup_lat=pickup_lat,
-            pickup_lon=pickup_lon,
-            db=db,
-            exclude_driver_ids=exclude_ids,
-        )
+        # Use pre-selected driver from agent fare quoting if available and still online
+        driver = None
+        if pre_selected_driver_id and pre_selected_driver_id not in exclude_ids:
+            _result = await db.execute(
+                select(DriverProfile).where(
+                    DriverProfile.user_id == pre_selected_driver_id,
+                    DriverProfile.availability == DriverAvailability.ONLINE,
+                    DriverProfile.subscription_active == True,
+                )
+            )
+            driver = _result.scalar_one_or_none()
+            if not driver:
+                logger.warning(
+                    "pre_selected_driver_unavailable",
+                    driver_id=str(pre_selected_driver_id),
+                    ride_id=str(ride_id),
+                )
+
+        if not driver:
+            # Fall back to scoring algorithm
+            driver = await self.find_best_driver(
+                pickup_lat=pickup_lat,
+                pickup_lon=pickup_lon,
+                db=db,
+                exclude_driver_ids=exclude_ids,
+            )
 
         if not driver:
             logger.warning("dispatch_no_driver_found", ride_id=str(ride_id))
