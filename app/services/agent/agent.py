@@ -84,6 +84,7 @@ class AgentService:
         user_id: UUID,
         user_message: str,
         db: AsyncSession,
+        user_name: str = "",
     ) -> AgentResponse:
         """
         Main entry point. Receives a raw passenger message and returns
@@ -223,12 +224,13 @@ Return ONLY this JSON structure, nothing else:
         history: list[dict],
         context_note: str,
         user_message: str,
+        user_name: str = "",
     ) -> str:
         """
         Generate a warm, natural language reply based on what has happened.
         context_note injects the outcome of the handler (e.g. fare, driver found).
         """
-        system_prompt = build_system_prompt(context_note=context_note)
+        system_prompt = build_system_prompt(context_note=context_note, user_name=user_name)
         messages = history[-settings.LLM_CONVERSATION_WINDOW:] + [
             {"role": "user", "content": user_message}
         ]
@@ -293,6 +295,7 @@ Return ONLY this JSON structure, nothing else:
                 history=history,
                 context_note=f"The user wants a ride but we still need: {extracted.missing_info}. Ask for it politely.",
                 user_message=user_message,
+            user_name=user_name,
             )
             return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
@@ -301,6 +304,7 @@ Return ONLY this JSON structure, nothing else:
                 history=history,
                 context_note="The user wants a ride but did not provide both pickup and destination. Ask for what is missing.",
                 user_message=user_message,
+            user_name=user_name,
             )
             return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
@@ -313,6 +317,7 @@ Return ONLY this JSON structure, nothing else:
                 history=history,
                 context_note="The location service is temporarily unavailable. Apologise and ask the user to try again shortly.",
                 user_message=user_message,
+            user_name=user_name,
             )
             return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
@@ -321,6 +326,7 @@ Return ONLY this JSON structure, nothing else:
                 history=history,
                 context_note=f"We could not find the pickup location '{extracted.pickup_name}' on the map. Ask the user to describe it differently or use a nearby landmark.",
                 user_message=user_message,
+            user_name=user_name,
             )
             return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
@@ -329,6 +335,7 @@ Return ONLY this JSON structure, nothing else:
                 history=history,
                 context_note=f"We could not find the destination '{extracted.dropoff_name}' on the map. Ask the user to describe it differently or use a nearby landmark.",
                 user_message=user_message,
+            user_name=user_name,
             )
             return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
@@ -345,6 +352,7 @@ Return ONLY this JSON structure, nothing else:
                 history=history,
                 context_note="The routing service is temporarily unavailable. Apologise and ask the user to try again shortly.",
                 user_message=user_message,
+            user_name=user_name,
             )
             return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
@@ -361,6 +369,7 @@ Return ONLY this JSON structure, nothing else:
                     "Apologise warmly and let the passenger know when they can book."
                 ),
                 user_message=user_message,
+            user_name=user_name,
             )
             return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
@@ -407,6 +416,7 @@ Return ONLY this JSON structure, nothing else:
                     "Apologise warmly and ask the passenger to try again in a few minutes."
                 ),
                 user_message=user_message,
+            user_name=user_name,
             )
             return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
@@ -450,6 +460,7 @@ Return ONLY this JSON structure, nothing else:
                 history=history,
                 context_note=f"User wants a delivery but we still need: {extracted.missing_info}. Ask politely.",
                 user_message=user_message,
+            user_name=user_name,
             )
             return AgentResponse(message=reply, intent=MessageIntent.DELIVERY_REQUEST)
 
@@ -458,6 +469,7 @@ Return ONLY this JSON structure, nothing else:
                 history=history,
                 context_note="User wants to send something but some details are missing. Ask for: what item, from where, to where, and if it is urgent.",
                 user_message=user_message,
+            user_name=user_name,
             )
             return AgentResponse(message=reply, intent=MessageIntent.DELIVERY_REQUEST)
 

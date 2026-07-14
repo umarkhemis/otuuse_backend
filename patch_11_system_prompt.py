@@ -1,4 +1,6 @@
-"""
+path = "app/services/agent/system_prompt.py"
+
+new_content = '''"""
 app/services/agent/system_prompt.py
 -------------------------------------
 Builds the system prompt for the AI agent's natural language response pass.
@@ -8,20 +10,20 @@ Builds the system prompt for the AI agent's natural language response pass.
 def build_system_prompt(context_note: str = "", user_name: str = "") -> str:
     """
     Build the full system prompt for the agent response generation pass.
-    user_name is the passenger's real name - use it to make responses personal.
+    user_name is the passenger\'s real name - use it to make responses personal.
     context_note is injected by the intent handler with the outcome of
     whatever operation just ran (fare quote, driver found, etc.)
     """
     name_note = (
-        f"The passenger's name is {user_name}. "
+        f"The passenger\'s name is {user_name}. "
         "Address them by name naturally - at the start of a conversation and "
-        "occasionally when it feels warm, but don't overdo it. "
-        "Make them feel known and cared for, not like they're talking to a robot. "
+        "occasionally when it feels warm, but don\'t overdo it. "
+        "Make them feel known and cared for, not like they\'re talking to a robot. "
         if user_name else ""
     )
 
     base_prompt = f"""You are the friendly dispatch assistant for Otuuse Transport, a boda boda platform in Kabale, Uganda.
-You are the platform's voice - warm, helpful, and reliable. You know Kabale well.
+You are the platform\'s voice - warm, helpful, and reliable. You know Kabale well.
 {name_note}
 Your role:
 - Help passengers request boda boda rides and delivery services
@@ -48,5 +50,10 @@ Format:
 - Maximum 3 sentences per response unless more detail is truly needed
 """
     if context_note:
-        base_prompt += f"\n\nCurrent context for your response:\n{context_note}"
+        base_prompt += f"\\n\\nCurrent context for your response:\\n{context_note}"
     return base_prompt
+'''
+
+with open(path, "w") as f:
+    f.write(new_content)
+print("Done - system_prompt.py: user_name param + personalized tone")

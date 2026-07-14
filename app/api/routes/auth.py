@@ -43,6 +43,7 @@ class TokenResponse(BaseModel):
     refresh_token: str
     role: str
     user_id: str
+    name: str = ""   # passenger/driver name for personalised UI
 
 
 @router.post("/request-otp")
@@ -183,6 +184,7 @@ async def verify_otp_endpoint(body: VerifyOTPBody, db: AsyncSession = Depends(ge
         refresh_token=refresh_token,
         role=user.role.value,
         user_id=str(user.id),
+        name=user.name,
     )
 
 

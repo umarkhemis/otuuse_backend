@@ -54,6 +54,7 @@ async def send_message(
         user_id=current_user.id,
         user_message=body.message.strip(),
         db=db,
+        user_name=current_user.name,
     )
 
     return ChatResponse(
