@@ -442,13 +442,21 @@ Return ONLY this JSON structure, nothing else:
             return AgentResponse(message=reply, intent=MessageIntent.DELIVERY_REQUEST)
 
         if not all([extracted.delivery_item, extracted.delivery_from, extracted.delivery_to]):
-            reply = await self._generate_response(
-                history=history,
-                context_note="User wants to send something but some details are missing. Ask for: what item, from where, to where, and if it is urgent.",
-                user_message=user_message,
-            user_name=user_name,
+            missing = []
+            if not extracted.delivery_item:
+                missing.append("what you'd like delivered")
+            if not extracted.delivery_from:
+                missing.append("where we should pick it up from")
+            if not extracted.delivery_to:
+                missing.append("where it needs to go")
+            missing_str = " and ".join(missing) if missing else "a few details"
+            return AgentResponse(
+                message=(
+                    f"I'd be happy to arrange that delivery for you! "
+                    f"Could you please tell me {missing_str}?"
+                ),
+                intent=MessageIntent.DELIVERY_REQUEST,
             )
-            return AgentResponse(message=reply, intent=MessageIntent.DELIVERY_REQUEST)
 
         # Create delivery ticket
         delivery = await crud.create_delivery(
