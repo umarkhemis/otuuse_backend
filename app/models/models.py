@@ -383,6 +383,8 @@ class Delivery(Base):
 
     # Admin working notes (internal, not shown to passenger)
     admin_notes = Column(Text)
+    passenger_photo_url = Column(Text, nullable=True)   # photo of item from passenger
+    admin_photo_url = Column(Text, nullable=True)        # photo from admin (e.g. proof of receipt)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

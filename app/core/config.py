@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     STORAGE_S3_REGION: str = "fra1"
     STORAGE_MAX_UPLOAD_MB: int = 8
 
+    # Cloudinary (used when STORAGE_PROVIDER=cloudinary)
+    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
+
     # ── Firebase ───────────────────────────────────────────────────────────────
     FIREBASE_CREDENTIALS_PATH: str = "firebase-service-account.json"
 

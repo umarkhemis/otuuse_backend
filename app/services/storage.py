@@ -35,6 +35,60 @@ class StorageService:
     def __init__(self):
         self.provider = settings.STORAGE_PROVIDER
 
+    def _build_photo_key(self, folder: str, filename: str) -> str:
+        ext = os.path.splitext(filename)[1].lower() or ".jpg"
+        import uuid as _uuid
+        return f"{folder}/{_uuid.uuid4().hex}{ext}"
+
+    async def upload_photo(
+        self,
+        content: bytes,
+        filename: str,
+        folder: str = "delivery-photos",
+    ) -> str:
+        """
+        Upload a photo and return a public-accessible URL.
+        Cloudinary -> returns secure_url directly.
+        Local -> returns a key served at /api/v1/files/{key}.
+        """
+        key = self._build_photo_key(folder, filename)
+        if self.provider == "cloudinary":
+            return await self._upload_cloudinary(content, folder)
+        elif self.provider == "local":
+            await self._upload_local(key, content)
+            return key
+        elif self.provider == "s3":
+            await self._upload_s3(key, content)
+            return await self.get_url(key)
+        raise StorageError(f"Unknown storage provider: {self.provider}")
+
+    def _build_photo_key(self, folder: str, filename: str) -> str:
+        ext = os.path.splitext(filename)[1].lower() or ".jpg"
+        import uuid as _uuid
+        return f"{folder}/{_uuid.uuid4().hex}{ext}"
+
+    async def upload_photo(
+        self,
+        content: bytes,
+        filename: str,
+        folder: str = "delivery-photos",
+    ) -> str:
+        """
+        Upload a photo and return a public-accessible URL.
+        Cloudinary -> returns secure_url directly.
+        Local -> returns a key served at /api/v1/files/{key}.
+        """
+        key = self._build_photo_key(folder, filename)
+        if self.provider == "cloudinary":
+            return await self._upload_cloudinary(content, folder)
+        elif self.provider == "local":
+            await self._upload_local(key, content)
+            return key
+        elif self.provider == "s3":
+            await self._upload_s3(key, content)
+            return await self.get_url(key)
+        raise StorageError(f"Unknown storage provider: {self.provider}")
+
     def _build_key(self, driver_user_id: str, doc_type: str, filename: str) -> str:
         ext = os.path.splitext(filename)[1].lower() or ".bin"
         return f"driver-documents/{driver_user_id}/{doc_type}_{uuid.uuid4().hex}{ext}"
