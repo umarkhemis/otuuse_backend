@@ -130,6 +130,7 @@ class AgentService:
             user_message=user_message,
             history=history,
             db=db,
+            user_name=user_name,
         )
 
         # 5. Save agent reply
@@ -250,6 +251,7 @@ Return ONLY this JSON structure, nothing else:
         user_message: str,
         history: list[dict],
         db: AsyncSession,
+        user_name: str = "",
     ) -> AgentResponse:
 
         handlers = {
@@ -269,6 +271,7 @@ Return ONLY this JSON structure, nothing else:
             user_message=user_message,
             history=history,
             db=db,
+            user_name=user_name,
         )
 
     async def _handle_ride_request(
@@ -278,6 +281,7 @@ Return ONLY this JSON structure, nothing else:
         user_message: str,
         history: list[dict],
         db: AsyncSession,
+        user_name: str = "",
     ) -> AgentResponse:
         """
         Full ride request flow:
@@ -291,53 +295,38 @@ Return ONLY this JSON structure, nothing else:
 
         # Step 1: Check for missing information
         if extracted.missing_info:
-            reply = await self._generate_response(
-                history=history,
-                context_note=f"The user wants a ride but we still need: {extracted.missing_info}. Ask for it politely.",
-                user_message=user_message,
-            user_name=user_name,
+            return AgentResponse(
+                message=f"To book a ride I need a bit more information: {extracted.missing_info}. Could you please share that?",
+                intent=MessageIntent.RIDE_REQUEST,
             )
-            return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
         if not extracted.pickup_name or not extracted.dropoff_name:
-            reply = await self._generate_response(
-                history=history,
-                context_note="The user wants a ride but did not provide both pickup and destination. Ask for what is missing.",
-                user_message=user_message,
-            user_name=user_name,
+            return AgentResponse(
+                message="To book a ride, please tell me both where you are and where you'd like to go.",
+                intent=MessageIntent.RIDE_REQUEST,
             )
-            return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
         # Step 2: Geocode both locations
         try:
             pickup_coords = await geocoding_service.geocode(extracted.pickup_name)
             dropoff_coords = await geocoding_service.geocode(extracted.dropoff_name)
         except GeocodingError:
-            reply = await self._generate_response(
-                history=history,
-                context_note="The location service is temporarily unavailable. Apologise and ask the user to try again shortly.",
-                user_message=user_message,
-            user_name=user_name,
+            return AgentResponse(
+                message="Sorry, our location service is having trouble right now. Please try again in a moment.",
+                intent=MessageIntent.RIDE_REQUEST,
             )
-            return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
         if not pickup_coords:
-            reply = await self._generate_response(
-                history=history,
-                context_note=f"We could not find the pickup location '{extracted.pickup_name}' on the map. Ask the user to describe it differently or use a nearby landmark.",
-                user_message=user_message,
-            user_name=user_name,
+            return AgentResponse(
+                message=f"Sorry, I couldn't find \"{extracted.pickup_name}\" on the map. Could you describe it differently or mention a nearby landmark?",
+                intent=MessageIntent.RIDE_REQUEST,
             )
-            return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
         if not dropoff_coords:
-            reply = await self._generate_response(
-                history=history,
-                context_note=f"We could not find the destination '{extracted.dropoff_name}' on the map. Ask the user to describe it differently or use a nearby landmark.",
-                user_message=user_message,
-            user_name=user_name,
+            return AgentResponse(
+                message=f"Sorry, I couldn't find \"{extracted.dropoff_name}\" on the map. Could you describe it differently or mention a nearby landmark?",
+                intent=MessageIntent.RIDE_REQUEST,
             )
-            return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
         # Step 3: Get route and calculate fare
         try:
@@ -348,30 +337,23 @@ Return ONLY this JSON structure, nothing else:
                 to_lon=dropoff_coords.longitude,
             )
         except RoutingError:
-            reply = await self._generate_response(
-                history=history,
-                context_note="The routing service is temporarily unavailable. Apologise and ask the user to try again shortly.",
-                user_message=user_message,
-            user_name=user_name,
+            return AgentResponse(
+                message="Sorry, we're having trouble calculating your route right now. Please try again in a moment.",
+                intent=MessageIntent.RIDE_REQUEST,
             )
-            return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
         # Step 4: Check operation hours (EAT = UTC+3)
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         _eat_now = _dt.now(_tz.utc) + _td(hours=3)
         if not (settings.OPERATION_START_HOUR <= _eat_now.hour < settings.OPERATION_END_HOUR):
-            reply = await self._generate_response(
-                history=history,
-                context_note=(
-                    f"We are currently outside operating hours. "
-                    f"The service runs from {settings.OPERATION_START_HOUR}:00am to "
-                    f"{settings.OPERATION_END_HOUR}:00pm East Africa Time. "
-                    "Apologise warmly and let the passenger know when they can book."
+            return AgentResponse(
+                message=(
+                    f"Sorry, we're currently closed. Otuuse Transport operates from "
+                    f"{settings.OPERATION_START_HOUR}:00am to {settings.OPERATION_END_HOUR}:00pm "
+                    "East Africa Time. We'll be ready to serve you then!"
                 ),
-                user_message=user_message,
-            user_name=user_name,
+                intent=MessageIntent.RIDE_REQUEST,
             )
-            return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
         # Step 5: Create ride record and dispatch to driver immediately.
         # The fare card is NOT shown to the passenger yet - it only appears
@@ -409,16 +391,10 @@ Return ONLY this JSON structure, nothing else:
             await db.commit()
             logger.warning("no_drivers_available_at_dispatch",
                            pickup=extracted.pickup_name, user_id=str(user_id))
-            reply = await self._generate_response(
-                history=history,
-                context_note=(
-                    f"No drivers are currently available near {extracted.pickup_name}. "
-                    "Apologise warmly and ask the passenger to try again in a few minutes."
-                ),
-                user_message=user_message,
-            user_name=user_name,
+            return AgentResponse(
+                message="Sorry, there are no drivers available near you right now. Please try again in a few minutes.",
+                intent=MessageIntent.RIDE_REQUEST,
             )
-            return AgentResponse(message=reply, intent=MessageIntent.RIDE_REQUEST)
 
         # Driver has been alerted - tell the passenger to hold on.
         # The fare card appears ONLY after the driver accepts (passenger polls /ride-status).
@@ -446,6 +422,7 @@ Return ONLY this JSON structure, nothing else:
         user_message: str,
         history: list[dict],
         db: AsyncSession,
+        user_name: str = "",
     ) -> AgentResponse:
         """
         Delivery flow:
@@ -515,6 +492,7 @@ Return ONLY this JSON structure, nothing else:
         user_message: str,
         history: list[dict],
         db: AsyncSession,
+        user_name: str = "",
     ) -> AgentResponse:
         """Check the user's most recent active ride or delivery and report status."""
 
@@ -561,6 +539,7 @@ Return ONLY this JSON structure, nothing else:
         user_message: str,
         history: list[dict],
         db: AsyncSession,
+        user_name: str = "",
     ) -> AgentResponse:
 
         active_ride = await crud.get_active_ride_for_passenger(user_id=user_id, db=db)
@@ -599,6 +578,7 @@ Return ONLY this JSON structure, nothing else:
         user_message: str,
         history: list[dict],
         db: AsyncSession,
+        user_name: str = "",
     ) -> AgentResponse:
 
         context_note = (
@@ -625,6 +605,7 @@ Return ONLY this JSON structure, nothing else:
         user_message: str,
         history: list[dict],
         db: AsyncSession,
+        user_name: str = "",
     ) -> AgentResponse:
 
         user = await crud.get_user_by_id(user_id=user_id, db=db)
@@ -651,6 +632,7 @@ Return ONLY this JSON structure, nothing else:
         user_message: str,
         history: list[dict],
         db: AsyncSession,
+        user_name: str = "",
     ) -> AgentResponse:
 
         context_note = (
