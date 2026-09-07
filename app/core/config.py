@@ -63,7 +63,9 @@ class Settings(BaseSettings):
     PRICING_RATE_PER_KM_UGX: int = 1200
     PRICING_RATE_PER_MINUTE_UGX: int = 50
     PRICING_MINIMUM_FARE_UGX: int = 2000
-    PRICING_COMMISSION_PERCENT: float = 15.0
+    PRICING_COMMISSION_PERCENT: float = 10.0
+    DRIVER_MIN_WALLET_UGX: int = 2000   # auto-suspend below this
+    PLATFORM_ADMIN_PHONE: str = ""      # phone of admin that receives all commissions
 
     # ── File Storage (driver verification documents) ─────────────────────────────
     STORAGE_PROVIDER: Literal["local", "s3"] = "local"

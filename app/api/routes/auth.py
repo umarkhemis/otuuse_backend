@@ -8,7 +8,7 @@ from typing import Annotated, Optional
 import phonenumbers
 from fastapi import APIRouter, Depends, HTTPException, status
 from jose import JWTError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,7 +43,8 @@ class TokenResponse(BaseModel):
     refresh_token: str
     role: str
     user_id: str
-    name: str = ""   # passenger/driver name for personalised UI
+    name: str = ""
+    must_change_password: bool = False   # driver first-login flag
 
 
 @router.post("/request-otp")
@@ -158,8 +159,9 @@ async def verify_otp_endpoint(body: VerifyOTPBody, db: AsyncSession = Depends(ge
     user.last_seen_at = now
 
     # Create tokens
-    access_token = create_access_token(subject=str(user.id), role=user.role.value)
-    refresh_token = create_refresh_token(subject=str(user.id), role=user.role.value)
+    _role_str = user.role.value if hasattr(user.role, 'value') else str(user.role)
+    access_token = create_access_token(subject=str(user.id), role=_role_str)
+    refresh_token = create_refresh_token(subject=str(user.id), role=_role_str)
 
     # Store refresh token hash
     from app.core.security import hash_otp as hash_token
@@ -182,11 +184,225 @@ async def verify_otp_endpoint(body: VerifyOTPBody, db: AsyncSession = Depends(ge
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
-        role=user.role.value,
+        role=_role_str,
         user_id=str(user.id),
         name=user.name,
     )
 
+
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Password-based authentication (replaces OTP for passengers and drivers)
+# ════════════════════════════════════════════════════════════════════════════════
+
+class RegisterBody(BaseModel):
+    phone_number: str
+    name: str
+    password: str = Field(..., min_length=6, description="At least 6 characters")
+
+
+class LoginBody(BaseModel):
+    phone_number: str
+    password: str
+
+
+class ChangePasswordBody(BaseModel):
+    old_password: str
+    new_password: str = Field(..., min_length=6)
+
+
+async def _build_token_response(user, db: AsyncSession) -> TokenResponse:
+    """Create JWT pair, persist refresh token, return TokenResponse."""
+    from datetime import datetime, timezone
+    from app.core.security import hash_otp as _hash_token
+    from app.models.models import RefreshToken
+    from jose import jwt as _jwt
+    from app.core.config import settings as _s
+
+    now = datetime.now(timezone.utc)
+    user.is_verified = True
+    user.last_seen_at = now
+
+    _role_str = user.role.value if hasattr(user.role, 'value') else str(user.role)
+    access_token = create_access_token(subject=str(user.id), role=_role_str)
+    refresh_token = create_refresh_token(subject=str(user.id), role=_role_str)
+
+    payload = _jwt.decode(refresh_token, _s.APP_SECRET_KEY, algorithms=[_s.JWT_ALGORITHM])
+    db.add(RefreshToken(
+        user_id=user.id,
+        token_hash=_hash_token(refresh_token),
+        jti=payload["jti"],
+        expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
+    ))
+    await db.commit()
+
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        role=_role_str,
+        user_id=str(user.id),
+        name=user.name,
+        must_change_password=bool(getattr(user, "must_change_password", False)),
+    )
+
+
+@router.post("/register", response_model=TokenResponse)
+async def register(body: RegisterBody, db: AsyncSession = Depends(get_db)):
+    """Passenger self-registration with phone + name + password."""
+    from app.core.security import hash_password as _hp
+    try:
+        parsed = phonenumbers.parse(body.phone_number, "UG")
+        normalized = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
+
+    existing = await get_user_by_phone(phone_number=normalized, db=db)
+    if existing:
+        raise HTTPException(status_code=409, detail="An account with this number already exists. Please log in.")
+
+    user = await create_user(
+        phone_number=normalized,
+        name=body.name.strip(),
+        role="passenger",
+        db=db,
+        password_hash=_hp(body.password),
+    )
+    return await _build_token_response(user, db)
+
+
+@router.post("/login", response_model=TokenResponse)
+async def login(body: LoginBody, db: AsyncSession = Depends(get_db)):
+    """Universal login for passengers, drivers, and admins."""
+    from app.core.security import verify_password as _vp
+    try:
+        parsed = phonenumbers.parse(body.phone_number, "UG")
+        normalized = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
+
+    user = await get_user_by_phone(phone_number=normalized, db=db)
+    if not user:
+        raise HTTPException(status_code=401, detail="No account found with this number")
+
+    if not user.password_hash:
+        raise HTTPException(
+            status_code=401,
+            detail="This account was set up before the password system. "
+                   "Please contact the administrator to reset your access.",
+        )
+
+    if not _vp(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect password")
+
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Your account has been suspended. Contact the administrator.")
+
+    return await _build_token_response(user, db)
+
+
+@router.post("/change-password")
+async def change_password(
+    body: ChangePasswordBody,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+):
+    """Change password. Required for drivers on first login."""
+    from app.core.security import verify_password as _vp, hash_password as _hp
+    from sqlalchemy import update as _update
+
+    if not current_user.password_hash or not _vp(body.old_password, current_user.password_hash):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+    await db.execute(
+        _update(User).where(User.id == current_user.id).values(
+            password_hash=_hp(body.new_password),
+            must_change_password=False,
+        )
+    )
+    await db.commit()
+    return {"message": "Password updated successfully"}
+
+
+
+# ── Forgot / Reset Password ───────────────────────────────────────────────────
+
+class ForgotPasswordBody(BaseModel):
+    phone_number: str
+
+
+class ResetPasswordBody(BaseModel):
+    phone_number: str
+    code: str
+    new_password: str = Field(..., min_length=6)
+
+
+@router.post("/forgot-password")
+async def forgot_password(body: ForgotPasswordBody, db: AsyncSession = Depends(get_db)):
+    """
+    Generate a 6-digit reset code and return it in the response.
+    The user is on their own device so showing the code is safe.
+    Code expires in 60 minutes.
+    """
+    import random
+    try:
+        parsed = phonenumbers.parse(body.phone_number, "UG")
+        normalized = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
+
+    user = await get_user_by_phone(phone_number=normalized, db=db)
+    if not user:
+        # Don't reveal whether account exists
+        raise HTTPException(status_code=404, detail="No account found with this number")
+
+    code = str(random.randint(100000, 999999))
+    redis = await otp_rate_limiter._get_redis() if hasattr(otp_rate_limiter, '_get_redis') else None
+
+    from app.services.cache import get_redis as _get_redis
+    redis = await _get_redis()
+    await redis.setex(f"pwd_reset:{normalized}", 3600, code)
+
+    return {
+        "code": code,
+        "message": "Copy this code and use it to reset your password. It expires in 60 minutes.",
+        "expires_minutes": 60,
+    }
+
+
+@router.post("/reset-password")
+async def reset_password(body: ResetPasswordBody, db: AsyncSession = Depends(get_db)):
+    """Verify reset code and set new password."""
+    from app.core.security import hash_password as _hp
+    from sqlalchemy import update as _update
+    from app.services.cache import get_redis as _get_redis
+
+    try:
+        parsed = phonenumbers.parse(body.phone_number, "UG")
+        normalized = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
+
+    redis = await _get_redis()
+    stored = await redis.get(f"pwd_reset:{normalized}")
+
+    if not stored or stored != body.code:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset code")
+
+    user = await get_user_by_phone(phone_number=normalized, db=db)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    await db.execute(
+        _update(User).where(User.id == user.id).values(
+            password_hash=_hp(body.new_password),
+            must_change_password=False,
+        )
+    )
+    await db.commit()
+    await redis.delete(f"pwd_reset:{normalized}")
+
+    return {"message": "Password reset successfully. Please log in with your new password."}
 
 # ── Token Refresh ────────────────────────────────────────────────────────────
 
@@ -256,7 +472,7 @@ async def refresh_access_token(body: RefreshBody, db: AsyncSession = Depends(get
     return TokenResponse(
         access_token=new_access,
         refresh_token=new_refresh,
-        role=user.role.value,
+        role=_role_str,
         user_id=str(user.id),
     )
 

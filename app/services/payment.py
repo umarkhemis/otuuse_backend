@@ -479,6 +479,81 @@ class PesaPalService:
             logger.error("ride_payment_failed", ride_id=str(ride_id), error=str(e))
             raise PaymentError(f"Payment processing failed: {str(e)}")
 
+
+    async def process_commission_deduction(
+        self,
+        ride_id: UUID,
+        db: AsyncSession,
+    ) -> None:
+        """
+        New business model: passenger pays driver directly (cash or MoMo).
+        Platform deducts its commission from the DRIVER's wallet.
+        Auto-suspends driver if balance drops below minimum.
+        Called when passenger confirms they have paid the driver.
+        """
+        ride = await db.get(Ride, ride_id)
+        if not ride:
+            raise PaymentError(f"Ride {ride_id} not found")
+
+        final_fare = ride.final_fare_ugx or ride.estimated_fare_ugx or 0
+        commission = int(final_fare * settings.PRICING_COMMISSION_PERCENT / 100)
+
+        # Load driver
+        driver_result = await db.execute(select(User).where(User.id == ride.driver_id))
+        driver = driver_result.scalar_one()
+
+        now = datetime.now(timezone.utc)
+
+        # Deduct commission from driver wallet
+        new_balance = max(0, driver.wallet_balance_ugx - commission)
+        await db.execute(
+            update(User).where(User.id == driver.id).values(wallet_balance_ugx=new_balance)
+        )
+
+        # Record commission transaction
+        from app.models.models import TransactionType, TransactionStatus
+        db.add(Transaction(
+            id=uuid.uuid4(),
+            user_id=driver.id,
+            type=TransactionType.COMMISSION,
+            status=TransactionStatus.COMPLETED,
+            amount_ugx=commission,
+            ride_id=ride.id,
+            description=f"Platform commission ({settings.PRICING_COMMISSION_PERCENT}%)",
+            balance_after_ugx=new_balance,
+            settled_at=now,
+        ))
+
+        # Mark ride as PAID with payment method
+        await db.execute(
+            update(Ride).where(Ride.id == ride_id).values(
+                status=RideStatus.PAID,
+                final_fare_ugx=final_fare,
+                commission_ugx=commission,
+                driver_earnings_ugx=final_fare,  # driver keeps full fare
+                paid_at=now,
+            )
+        )
+        await db.commit()
+
+        logger.info("commission_deducted",
+                    ride_id=str(ride_id),
+                    commission=commission,
+                    driver_balance=new_balance)
+
+        # Auto-suspend driver if balance below minimum
+        if new_balance < settings.DRIVER_MIN_WALLET_UGX:
+            from app.models.models import DriverProfile, DriverAvailability
+            from sqlalchemy import update as _upd
+            await db.execute(
+                _upd(DriverProfile)
+                .where(DriverProfile.user_id == driver.id)
+                .values(availability=DriverAvailability.OFFLINE)
+            )
+            await db.commit()
+            logger.warning("driver_auto_suspended_low_balance",
+                          driver_id=str(driver.id), balance=new_balance)
+
     # ── Driver Withdrawal ──────────────────────────────────────────────────────
 
     async def initiate_driver_withdrawal(
@@ -583,6 +658,81 @@ class PesaPalService:
             )
             await db.commit()
             logger.error("driver_withdrawal_failed", error=str(e))
+            raise PaymentError(f"Withdrawal failed: {str(e)}")
+
+
+    async def initiate_admin_withdrawal(
+        self,
+        admin: User,
+        amount_ugx: int,
+        phone_number: str,
+        db: AsyncSession,
+    ) -> dict:
+        """
+        Platform admin withdraws accumulated commissions to mobile money.
+        Same flow as driver withdrawal but for the admin/platform account.
+        """
+        if amount_ugx < 5000:
+            raise PaymentError("Minimum withdrawal amount is 5,000 UGX")
+        if admin.wallet_balance_ugx < amount_ugx:
+            raise PaymentError(
+                f"Insufficient balance. Available: {admin.wallet_balance_ugx:,} UGX"
+            )
+        token = await self._get_token()
+        new_balance = admin.wallet_balance_ugx - amount_ugx
+        await db.execute(
+            update(User).where(User.id == admin.id)
+            .values(wallet_balance_ugx=new_balance)
+        )
+        withdrawal_txn = Transaction(
+            id=uuid.uuid4(),
+            user_id=admin.id,
+            type=TransactionType.WITHDRAWAL,
+            status=TransactionStatus.PENDING,
+            amount_ugx=amount_ugx,
+            description=f"Platform commission withdrawal to {phone_number}",
+            balance_after_ugx=new_balance,
+        )
+        db.add(withdrawal_txn)
+        await db.commit()
+        payload = {
+            "amount": amount_ugx,
+            "currency": "UGX",
+            "phone_number": phone_number.lstrip("+"),
+            "description": "Otuuse Platform - Commission Withdrawal",
+            "reference": str(withdrawal_txn.id),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.post(
+                    f"{self.base_url}/api/Transactions/MobileMoneySend",
+                    json=payload,
+                    headers=self._auth_headers(token),
+                )
+                response.raise_for_status()
+                data = response.json()
+            await db.execute(
+                update(Transaction).where(Transaction.id == withdrawal_txn.id)
+                .values(
+                    status=TransactionStatus.COMPLETED,
+                    pesapal_tracking_id=data.get("tracking_id"),
+                    settled_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+            logger.info("admin_withdrawal_initiated",
+                       admin_id=str(admin.id), amount_ugx=amount_ugx)
+            return {"status": "initiated", "amount_ugx": amount_ugx, "new_balance_ugx": new_balance}
+        except httpx.HTTPError as e:
+            await db.execute(
+                update(User).where(User.id == admin.id)
+                .values(wallet_balance_ugx=admin.wallet_balance_ugx)
+            )
+            await db.execute(
+                update(Transaction).where(Transaction.id == withdrawal_txn.id)
+                .values(status=TransactionStatus.FAILED)
+            )
+            await db.commit()
             raise PaymentError(f"Withdrawal failed: {str(e)}")
 
     # ── Helpers ────────────────────────────────────────────────────────────────

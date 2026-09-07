@@ -69,6 +69,9 @@ async def send_message(
     )
 
 
+class ConfirmPaymentBody(BaseModel):
+    payment_method: str  # "cash" | "momo"
+
 class ConfirmRideBody(BaseModel):
     confirmed: bool
     ride_id: str | None = None   # required in the new driver-first flow
@@ -210,7 +213,7 @@ async def get_delivery_status(
         _sel(Message)
         .where(
             Message.delivery_id == delivery.id,
-            Message.role == MessageRole.ADMIN,  # Only admin replies, not initial agent messages
+            Message.role == MessageRole.AGENT,  # LLM relay of admin reply saved as AGENT role
         )
         .order_by(_desc(Message.created_at))
         .limit(1)
@@ -276,6 +279,48 @@ async def upload_delivery_photo(
     await notification_service.notify_admin_new_delivery(delivery_id=delivery.id, db=db)
 
     return {"url": url, "message": "Photo uploaded successfully"}
+
+
+@router.post("/rides/{ride_id}/confirm-payment")
+async def confirm_payment(
+    ride_id: str,
+    body: "ConfirmPaymentBody",
+    current_user: Annotated[User, Depends(get_current_passenger)],
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Passenger confirms they have paid the driver (cash or MoMo).
+    Triggers platform commission deduction from driver's wallet.
+    """
+    from app.models.models import Ride, RideStatus
+    from app.services.payment import payment_service
+    from sqlalchemy import update as _upd
+    from uuid import UUID as _UUID
+
+    ride = await db.get(Ride, _UUID(ride_id))
+    if not ride or ride.passenger_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Ride not found")
+
+    if ride.status != RideStatus.COMPLETED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ride is {ride.status.value} - cannot confirm payment yet"
+        )
+
+    # Record payment method
+    await db.execute(
+        _upd(Ride).where(Ride.id == ride.id).values(payment_method=body.payment_method)
+    )
+    await db.commit()
+
+    # Deduct commission from driver wallet
+    await payment_service.process_commission_deduction(ride_id=ride.id, db=db)
+
+    return {
+        "message": "Payment confirmed. Thank you!",
+        "payment_method": body.payment_method,
+    }
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 """

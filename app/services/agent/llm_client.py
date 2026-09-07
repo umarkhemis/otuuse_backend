@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 
 # Groq configuration
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-GROQ_DEFAULT_MODEL = "llama-3.1-8b-instant"   # fast and capable for classification
+GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"   # fast and capable for classification
 
 # Anthropic configuration (for production switch)
 ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"

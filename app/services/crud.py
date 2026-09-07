@@ -40,6 +40,8 @@ async def create_user(
     name: str,
     role: str,
     db: AsyncSession,
+    password_hash: str = None,
+    must_change_password: bool = False,
 ) -> User:
     user = User(
         id=uuid.uuid4(),
@@ -47,8 +49,10 @@ async def create_user(
         name=name,
         role=role,
         is_active=True,
-        is_verified=False,
+        is_verified=True,
         wallet_balance_ugx=0,
+        password_hash=password_hash,
+        must_change_password=must_change_password,
     )
     db.add(user)
     await db.flush()   # flush to get the ID without committing

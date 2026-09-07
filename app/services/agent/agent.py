@@ -658,5 +658,125 @@ Return ONLY this JSON structure, nothing else:
         return AgentResponse(message=reply, intent=MessageIntent.UNCLEAR)
 
 
+    async def _handle_destination_change(
+        self,
+        extracted: ExtractedData,
+        user_id: UUID,
+        user_message: str,
+        history: list[dict],
+        db: AsyncSession,
+        user_name: str = "",
+    ) -> AgentResponse:
+        """
+        Mid-ride destination change.
+        Recalculates fare from driver's current GPS to the new destination.
+        Updates ride record and notifies driver.
+        """
+        from app.services.crud import get_active_ride_for_passenger
+        from app.models.models import DriverProfile, Ride
+        from sqlalchemy import select as _sel, update as _upd
+
+        ride = await get_active_ride_for_passenger(user_id=user_id, db=db)
+        if not ride or ride.status.value not in ("accepted", "driver_arriving", "in_progress"):
+            return AgentResponse(
+                message="You don\'t have an active ride right now to change the destination for.",
+                intent=MessageIntent.DESTINATION_CHANGE,
+            )
+
+        new_destination = extracted.dropoff_name
+        if not new_destination:
+            return AgentResponse(
+                message="Where would you like to go instead? Please tell me the new destination.",
+                intent=MessageIntent.DESTINATION_CHANGE,
+            )
+
+        # Get driver's current GPS location
+        dp_result = await db.execute(
+            _sel(DriverProfile).where(DriverProfile.user_id == ride.driver_id)
+        )
+        dp = dp_result.scalar_one_or_none()
+
+        if dp and dp.current_location is not None:
+            try:
+                from geoalchemy2.shape import to_shape as _to_shape
+                _shape = _to_shape(dp.current_location)
+                current_lat, current_lon = _shape.y, _shape.x
+            except Exception:
+                current_lat = ride.pickup_lat
+                current_lon = ride.pickup_lon
+        else:
+            current_lat = ride.pickup_lat
+            current_lon = ride.pickup_lon
+
+        # Geocode new destination
+        try:
+            new_dropoff = await geocoding_service.geocode(new_destination)
+        except Exception:
+            new_dropoff = None
+
+        if not new_dropoff:
+            return AgentResponse(
+                message=f"Sorry, I couldn\'t find \"{new_destination}\" on the map. Try describing it differently.",
+                intent=MessageIntent.DESTINATION_CHANGE,
+            )
+
+        # Calculate new route from current position
+        try:
+            new_route = await routing_service.get_route(
+                from_lat=current_lat,
+                from_lon=current_lon,
+                to_lat=new_dropoff.latitude,
+                to_lon=new_dropoff.longitude,
+            )
+        except Exception:
+            return AgentResponse(
+                message="Sorry, I couldn\'t calculate the route to that location. Please try again.",
+                intent=MessageIntent.DESTINATION_CHANGE,
+            )
+
+        # Update ride with new destination and fare
+        await db.execute(
+            _upd(Ride).where(Ride.id == ride.id).values(
+                dropoff_name=new_destination,
+                dropoff_lat=new_dropoff.latitude,
+                dropoff_lon=new_dropoff.longitude,
+                estimated_fare_ugx=new_route.estimated_fare_ugx,
+                estimated_distance_km=new_route.distance_km,
+                estimated_duration_minutes=new_route.duration_minutes,
+            )
+        )
+        await db.commit()
+
+        # Notify driver of new destination
+        try:
+            from app.services.notifications import notification_service
+            from app.models.models import PushToken
+            tokens_result = await db.execute(
+                _sel(PushToken.fcm_token).where(
+                    PushToken.user_id == ride.driver_id,
+                    PushToken.is_active == True,
+                )
+            )
+            tokens = [r[0] for r in tokens_result.all()]
+            if tokens:
+                await notification_service._send(
+                    tokens=tokens,
+                    title="Destination Changed",
+                    body=f"New destination: {new_destination}",
+                    data={"type": "destination_changed", "ride_id": str(ride.id)},
+                )
+        except Exception:
+            pass
+
+        return AgentResponse(
+            message=(
+                f"Done! Your new destination is {new_destination}. "
+                f"Updated fare: {new_route.estimated_fare_ugx:,} UGX "
+                f"({new_route.distance_km}km, ~{round(new_route.duration_minutes)} min). "
+                f"Your driver has been notified."
+            ),
+            intent=MessageIntent.DESTINATION_CHANGE,
+        )
+
 # ── Singleton ──────────────────────────────────────────────────────────────────
 agent_service = AgentService()

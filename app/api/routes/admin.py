@@ -500,61 +500,16 @@ async def reply_to_delivery(
     )
     await db.commit()
 
-    # Now relay the admin's message to the passenger via the agent
-    # The agent voices it naturally so it doesn't feel robotic
-    from app.services.agent.llm_client import llm_client
-    from app.services.agent.system_prompt import build_system_prompt
-
-    relay_prompt = (
-        f"The admin has provided the following response to the passenger's delivery request: "
-        f'"{body.message}". '
-        "Relay this to the passenger in a warm, natural way as the platform's voice. "
-        "Do not add information that wasn't in the admin's message. Keep it concise."
-    )
-
-    agent_reply = await llm_client.complete(
-        system_prompt=build_system_prompt(context_note=relay_prompt),
-        messages=[{"role": "user", "content": "What's the update on my delivery?"}],
-        max_tokens=300,
-    )
-
-    # Save agent's relay message to the passenger's conversation
-    agent_message = Message(
-        id=uuid.uuid4(),
-        user_id=delivery.passenger_id,
-        role=MessageRole.AGENT,
-        content=agent_reply,
-        intent=MessageIntent.DELIVERY_REQUEST,
+    # Relay admin message to passenger in background (non-blocking)
+    import asyncio as _asyncio
+    _asyncio.create_task(_relay_admin_message(
+        admin_message=body.message,
+        passenger_id=delivery.passenger_id,
         delivery_id=delivery.id,
-    )
-    db.add(agent_message)
-    await db.commit()
-
-    # Send push notification to passenger
-    from app.services.notifications import notification_service
-    from app.models.models import PushToken
-    passenger_tokens_result = await db.execute(
-        select(PushToken.fcm_token).where(
-            PushToken.user_id == delivery.passenger_id,
-            PushToken.is_active == True,
-        )
-    )
-    tokens = [row[0] for row in passenger_tokens_result.fetchall()]
-    if tokens:
-        from firebase_admin import messaging
-        msg = messaging.MulticastMessage(
-            tokens=tokens,
-            notification=messaging.Notification(
-                title="Delivery Update",
-                body=agent_reply[:100],
-            ),
-            data={"type": "delivery_update", "delivery_id": delivery_id},
-        )
-        messaging.send_each_for_multicast(msg)
-
+    ))
     return {
-        "message": "Reply sent to passenger",
-        "agent_relay": agent_reply,
+        "message": "Reply sent",
+        "delivery_id": delivery_id,
     }
 
 
@@ -645,6 +600,44 @@ async def admin_upload_driver_document(
     }
 
 # ── Dashboard ──────────────────────────────────────────────────────────────────
+
+
+async def _relay_admin_message(admin_message: str, passenger_id, delivery_id):
+    """
+    Relay admin delivery reply to passenger as an agent message.
+    Runs in background so admin gets immediate HTTP response.
+    """
+    try:
+        from app.services.agent.llm_client import llm_client
+        from app.services.agent.system_prompt import build_system_prompt
+        from app.db.session import AsyncSessionLocal
+
+        relay_prompt = (
+            f"The admin has provided this response to the passenger's delivery request: "
+            f'"{admin_message}". '
+            "Relay it warmly as the platform's voice. "
+            "Do not add information that wasn't in the admin's message. Keep it brief."
+        )
+        agent_reply = await llm_client.complete(
+            system_prompt=build_system_prompt(context_note=relay_prompt),
+            messages=[{"role": "user", "content": "What's the update on my delivery?"}],
+            max_tokens=200,
+        )
+        async with AsyncSessionLocal() as db:
+            msg = Message(
+                id=uuid.uuid4(),
+                user_id=passenger_id,
+                role=MessageRole.AGENT,
+                content=agent_reply,
+                intent=MessageIntent.DELIVERY_REQUEST,
+                delivery_id=delivery_id,
+            )
+            db.add(msg)
+            await db.commit()
+    except Exception as _e:
+        import logging
+        logging.getLogger(__name__).error(f"relay_admin_message_failed: {_e}")
+
 
 @router.get("/dashboard")
 async def get_dashboard(
@@ -851,6 +844,79 @@ async def admin_upload_delivery_photo(
     await db.commit()
 
     return {"url": url, "message": "Photo uploaded"}
+
+
+# ── Admin Wallet ──────────────────────────────────────────────────────────────
+
+@router.get("/wallet/balance")
+async def get_admin_wallet_balance(
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin views accumulated commission balance."""
+    from sqlalchemy import func as _func
+    from app.models.models import Transaction, TransactionType, TransactionStatus
+
+    # Total commissions received
+    result = await db.execute(
+        select(_func.coalesce(_func.sum(Transaction.amount_ugx), 0))
+        .where(
+            Transaction.user_id == current_admin.id,
+            Transaction.type == TransactionType.COMMISSION,
+            Transaction.status == TransactionStatus.COMPLETED,
+        )
+    )
+    total_commissions = result.scalar()
+
+    # Total withdrawn
+    result2 = await db.execute(
+        select(_func.coalesce(_func.sum(Transaction.amount_ugx), 0))
+        .where(
+            Transaction.user_id == current_admin.id,
+            Transaction.type == TransactionType.WITHDRAWAL,
+            Transaction.status == TransactionStatus.COMPLETED,
+        )
+    )
+    total_withdrawn = result2.scalar()
+
+    return {
+        "wallet_balance_ugx": current_admin.wallet_balance_ugx,
+        "total_commissions_received_ugx": total_commissions,
+        "total_withdrawn_ugx": total_withdrawn,
+    }
+
+
+class AdminWithdrawBody(BaseModel):
+    amount_ugx: int
+    phone_number: Optional[str] = None   # defaults to admin's registered phone
+
+
+@router.post("/wallet/withdraw")
+async def admin_withdraw_commissions(
+    body: AdminWithdrawBody,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin withdraws accumulated commissions to mobile money."""
+    from app.services.payment import payment_service
+    phone = body.phone_number or current_admin.phone_number
+    result = await payment_service.initiate_admin_withdrawal(
+        admin=current_admin,
+        amount_ugx=body.amount_ugx,
+        phone_number=phone,
+        db=db,
+    )
+    await log_admin_action(
+        db,
+        admin_id=current_admin.id,
+        action="wallet_withdrawal",
+        target_type="wallet",
+        target_id=str(current_admin.id),
+        details=f"Withdrew {body.amount_ugx:,} UGX to {phone}",
+    )
+    await db.commit()
+    return result
+
 
 # ── Audit Log ───────────────────────────────────────────────────────────────
 

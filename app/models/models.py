@@ -103,6 +103,7 @@ class MessageIntent(str, enum.Enum):
     DELIVERY_REQUEST = "delivery_request"
     STATUS_INQUIRY = "status_inquiry"
     CANCELLATION = "cancellation"
+    DESTINATION_CHANGE = "destination_change"
     GENERAL_QUESTION = "general_question"
     GREETING = "greeting"
     UNCLEAR = "unclear"
@@ -144,6 +145,8 @@ class User(Base):
     name = Column(String(100), nullable=False)
     role = Column(Enum(UserRole, values_callable=lambda obj: [e.value for e in obj]), nullable=False, index=True)
     pin_hash = Column(String(200), nullable=True)  # admin-only 2nd factor; null until first admin login sets it
+    password_hash = Column(String(200), nullable=True)
+    must_change_password = Column(Boolean, default=False, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     is_verified = Column(Boolean, default=False, nullable=False)
 
@@ -285,6 +288,7 @@ class Ride(Base):
     estimated_distance_km = Column(Float)
     estimated_duration_minutes = Column(Float)
     actual_distance_km = Column(Float)          # calculated from GPS trail on completion
+    payment_method = Column(String(10), nullable=True)   # "cash" or "momo"
     actual_duration_minutes = Column(Float)
 
     # Pricing

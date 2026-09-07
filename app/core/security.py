@@ -81,6 +81,16 @@ def verify_token_type(payload: dict, expected_type: str) -> bool:
 
 # ── PIN hashing (for driver accounts) ─────────────────────────────────────────
 
+def hash_password(password: str) -> str:
+    """Hash a user password using bcrypt."""
+    return pwd_context.hash(password)
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    """Verify a plain password against its bcrypt hash."""
+    return pwd_context.verify(plain, hashed)
+
+
 def hash_pin(pin: str) -> str:
     """Hash a 4-6 digit PIN using bcrypt."""
     return pwd_context.hash(pin)
