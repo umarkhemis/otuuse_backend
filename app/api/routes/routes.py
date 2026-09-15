@@ -756,3 +756,42 @@ async def driver_wallet_withdraw(
         db=db,
     )
     return result
+
+
+class MomoPaymentBody(BaseModel):
+    ride_id: str
+    amount_ugx: int
+    driver_phone: str
+
+
+@router.post("/rides/pay-momo")
+async def initiate_momo_payment(
+    body: MomoPaymentBody,
+    current_user: Annotated[User, Depends(get_current_passenger)],
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Passenger initiates MoMo payment to driver via PesaPal.
+    Returns a redirect URL for the passenger to complete payment.
+    """
+    from app.services.payment import payment_service, PaymentError
+    from app.models.models import Ride
+    from uuid import UUID as _UUID
+
+    ride = await db.get(Ride, _UUID(body.ride_id))
+    if not ride or ride.passenger_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Ride not found")
+
+    try:
+        result = await payment_service.initiate_wallet_topup(
+            user=current_user,
+            amount_ugx=body.amount_ugx,
+            db=db,
+        )
+        return {
+            "redirect_url": result["redirect_url"],
+            "amount_ugx": body.amount_ugx,
+            "driver_phone": body.driver_phone,
+        }
+    except PaymentError as e:
+        raise HTTPException(status_code=400, detail=str(e))

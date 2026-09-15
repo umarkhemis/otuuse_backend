@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     PRICING_RATE_PER_MINUTE_UGX: int = 50
     PRICING_MINIMUM_FARE_UGX: int = 2000
     PRICING_COMMISSION_PERCENT: float = 10.0
-    DRIVER_MIN_WALLET_UGX: int = 2000   # auto-suspend below this
+    DRIVER_MIN_WALLET_UGX: int = 3000   # auto-suspend below this
     PLATFORM_ADMIN_PHONE: str = ""
     SUPER_ADMIN_PHONE: str = ""   # this admin can create other admins      # phone of admin that receives all commissions
 
