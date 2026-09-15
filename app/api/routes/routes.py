@@ -713,3 +713,46 @@ async def get_transactions(
         }
         for t in transactions
     ]
+
+
+class DriverTopupBody(BaseModel):
+    amount_ugx: int
+
+
+class DriverWithdrawBody(BaseModel):
+    amount_ugx: int
+    phone_number: str | None = None
+
+
+@driver_router.post("/wallet/topup")
+async def driver_wallet_topup(
+    body: DriverTopupBody,
+    current_user: Annotated[User, Depends(get_current_driver)],
+    db: AsyncSession = Depends(get_db),
+):
+    """Driver initiates wallet top-up via PesaPal."""
+    from app.services.payment import payment_service
+    result = await payment_service.initiate_wallet_topup(
+        user=current_user,
+        amount_ugx=body.amount_ugx,
+        db=db,
+    )
+    return result
+
+
+@driver_router.post("/wallet/withdraw")
+async def driver_wallet_withdraw(
+    body: DriverWithdrawBody,
+    current_user: Annotated[User, Depends(get_current_driver)],
+    db: AsyncSession = Depends(get_db),
+):
+    """Driver withdraws earnings to their mobile money number."""
+    from app.services.payment import payment_service
+    phone = body.phone_number or current_user.phone_number
+    result = await payment_service.initiate_driver_withdrawal(
+        driver=current_user,
+        amount_ugx=body.amount_ugx,
+        phone_number=phone,
+        db=db,
+    )
+    return result

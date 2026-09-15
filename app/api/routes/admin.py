@@ -846,6 +846,78 @@ async def admin_upload_delivery_photo(
     return {"url": url, "message": "Photo uploaded"}
 
 
+
+class CreateAdminBody(BaseModel):
+    phone_number: str
+    name: str
+    initial_password: str = "Admin@2026"   # admin must change on first login
+
+
+@router.post("/create-admin")
+async def create_admin(
+    body: CreateAdminBody,
+    current_admin: Annotated[User, Depends(get_current_admin)],
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Super admin creates a new admin account.
+    Only the phone number set in SUPER_ADMIN_PHONE can call this.
+    New admin is forced to change password on first login.
+    """
+    from app.core.config import settings as _s
+    from app.services.crud import get_user_by_phone, create_user
+    from app.core.security import hash_password as _hp
+    import phonenumbers as _ph
+
+    # Only super admin can create admins
+    if not _s.SUPER_ADMIN_PHONE or current_admin.phone_number != _s.SUPER_ADMIN_PHONE:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the platform super admin can create admin accounts"
+        )
+
+    # Normalize phone
+    try:
+        parsed = _ph.parse(body.phone_number, "UG")
+        normalized = _ph.format_number(parsed, _ph.PhoneNumberFormat.E164)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
+
+    existing = await get_user_by_phone(phone_number=normalized, db=db)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="An account with this phone number already exists"
+        )
+
+    user = await create_user(
+        phone_number=normalized,
+        name=body.name.strip(),
+        role="admin",
+        db=db,
+        password_hash=_hp(body.initial_password),
+        must_change_password=True,
+    )
+    await db.commit()
+
+    await log_admin_action(
+        db,
+        admin_id=current_admin.id,
+        action="create_admin",
+        target_type="user",
+        target_id=str(user.id),
+        details=f"Created admin: {body.name} ({normalized})",
+    )
+    await db.commit()
+
+    return {
+        "message": f"Admin account created for {body.name}",
+        "phone_number": normalized,
+        "must_change_password": True,
+        "note": "Share the initial password with them. They will be forced to change it on first login.",
+    }
+
+
 # ── Admin Wallet ──────────────────────────────────────────────────────────────
 
 @router.get("/wallet/balance")

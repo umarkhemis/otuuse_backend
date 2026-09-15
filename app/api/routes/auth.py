@@ -45,6 +45,7 @@ class TokenResponse(BaseModel):
     user_id: str
     name: str = ""
     must_change_password: bool = False   # driver first-login flag
+    is_super_admin: bool = False
 
 
 @router.post("/request-otp")
@@ -244,6 +245,7 @@ async def _build_token_response(user, db: AsyncSession) -> TokenResponse:
         user_id=str(user.id),
         name=user.name,
         must_change_password=bool(getattr(user, "must_change_password", False)),
+        is_super_admin=(user.phone_number == settings.SUPER_ADMIN_PHONE and bool(settings.SUPER_ADMIN_PHONE)),
     )
 
 
