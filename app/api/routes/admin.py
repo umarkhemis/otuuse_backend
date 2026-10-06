@@ -32,6 +32,7 @@ from app.models.models import (
 from app.services.crud import issue_driver_strike
 from app.services.audit import log_admin_action
 from app.core.logging import get_logger
+from app.core.security import hash_pin, hash_password
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -79,7 +80,9 @@ async def onboard_driver(
         name=body.name,
         role=UserRole.DRIVER,
         is_active=True,
+        password_hash=hash_password(body.initial_pin),
         is_verified=True,   # admin-verified at onboarding
+        must_change_password=True,
         wallet_balance_ugx=0,
     )
     db.add(user)

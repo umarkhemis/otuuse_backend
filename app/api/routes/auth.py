@@ -21,6 +21,7 @@ from app.models.models import OTPRecord, PushToken, RefreshToken, User, UserRole
 from app.services.crud import get_user_by_id, get_user_by_phone, create_user
 from app.services.cache import otp_rate_limiter
 from app.core.logging import get_logger
+from app.core.security import hash_pin, hash_password
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
