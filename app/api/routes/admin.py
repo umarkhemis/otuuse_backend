@@ -397,10 +397,19 @@ async def list_deliveries(
     result = await db.execute(query)
     deliveries = result.scalars().all()
 
+    # Load passenger details for each delivery
+    passenger_ids = list({d.passenger_id for d in deliveries})
+    passengers_result = await db.execute(
+        select(User).where(User.id.in_(passenger_ids))
+    )
+    passengers = {u.id: u for u in passengers_result.scalars().all()}
+
     return [
         {
             "id": str(d.id),
             "passenger_id": str(d.passenger_id),
+            "passenger_name": passengers.get(d.passenger_id, User()).name or "Unknown",
+            "passenger_phone": passengers.get(d.passenger_id, User()).phone_number or "",
             "pickup_name": d.pickup_name,
             "dropoff_name": d.dropoff_name,
             "item_description": d.item_description,
