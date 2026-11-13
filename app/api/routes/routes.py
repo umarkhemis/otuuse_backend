@@ -170,6 +170,8 @@ async def get_ride_status(
         RideStatus.ACCEPTED,
         RideStatus.DRIVER_ARRIVING,
         RideStatus.IN_PROGRESS,
+        RideStatus.COMPLETED,
+        RideStatus.PAID,
     ] and ride.driver_id:
         driver_user = await db.get(User, ride.driver_id)
         dp_result = await db.execute(
@@ -177,7 +179,7 @@ async def get_ride_status(
         )
         dp = dp_result.scalar_one_or_none()
         base.update({
-            "fare_ugx": ride.estimated_fare_ugx,
+            "fare_ugx": ride.final_fare_ugx or ride.estimated_fare_ugx,
             "distance_km": ride.estimated_distance_km,
             "driver_name": driver_user.name if driver_user else "Your driver",
             "driver_phone": driver_user.phone_number if driver_user else "",
@@ -301,7 +303,7 @@ async def confirm_payment(
     if not ride or ride.passenger_id != current_user.id:
         raise HTTPException(status_code=404, detail="Ride not found")
 
-    if ride.status != RideStatus.COMPLETED:
+    if ride.status not in (RideStatus.COMPLETED, RideStatus.PAID):
         raise HTTPException(
             status_code=400,
             detail=f"Ride is {ride.status.value} - cannot confirm payment yet"
@@ -313,8 +315,7 @@ async def confirm_payment(
     )
     await db.commit()
 
-    # Deduct commission from driver wallet
-    await payment_service.process_commission_deduction(ride_id=ride.id, db=db)
+    # Commission is charged when the driver completes the ride, not here.
 
     return {
         "message": "Payment confirmed. Thank you!",
@@ -756,42 +757,3 @@ async def driver_wallet_withdraw(
         db=db,
     )
     return result
-
-
-class MomoPaymentBody(BaseModel):
-    ride_id: str
-    amount_ugx: int
-    driver_phone: str
-
-
-@router.post("/rides/pay-momo")
-async def initiate_momo_payment(
-    body: MomoPaymentBody,
-    current_user: Annotated[User, Depends(get_current_passenger)],
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Passenger initiates MoMo payment to driver via PesaPal.
-    Returns a redirect URL for the passenger to complete payment.
-    """
-    from app.services.payment import payment_service, PaymentError
-    from app.models.models import Ride
-    from uuid import UUID as _UUID
-
-    ride = await db.get(Ride, _UUID(body.ride_id))
-    if not ride or ride.passenger_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Ride not found")
-
-    try:
-        result = await payment_service.initiate_wallet_topup(
-            user=current_user,
-            amount_ugx=body.amount_ugx,
-            db=db,
-        )
-        return {
-            "redirect_url": result["redirect_url"],
-            "amount_ugx": body.amount_ugx,
-            "driver_phone": body.driver_phone,
-        }
-    except PaymentError as e:
-        raise HTTPException(status_code=400, detail=str(e))

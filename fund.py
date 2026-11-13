@@ -7,7 +7,7 @@ PHONE = "+256782705521"   # test driver's number
 async def main():
     async with AsyncSessionLocal() as db:
         await db.execute(
-            text("UPDATE users SET wallet_balance_ugx = 20000 WHERE phone_number = :p"),
+            text("UPDATE users SET wallet_balance_ugx = 50000 WHERE phone_number = :p"),
             {"p": PHONE},
         )
         await db.commit()

@@ -606,7 +606,12 @@ class DispatchService:
 
         # Trigger payment
         from app.services.payment import payment_service
-        await payment_service.process_ride_payment(ride_id=ride_id, db=db)
+        # Platform commission is charged to the driver wallet at completion,
+        # so it never depends on the passenger confirming anything.
+        try:
+            await payment_service.process_commission_deduction(ride_id=ride_id, db=db)
+        except Exception as _err:
+            logger.error("commission_deduction_failed", ride_id=str(ride_id), error=str(_err))
 
         logger.info(
             "ride_completed",

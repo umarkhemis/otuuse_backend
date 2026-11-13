@@ -494,6 +494,8 @@ class PesaPalService:
         ride = await db.get(Ride, ride_id)
         if not ride:
             raise PaymentError(f"Ride {ride_id} not found")
+        if ride.status == RideStatus.PAID:
+            return   # already charged, never charge twice
 
         final_fare = ride.final_fare_ugx or ride.estimated_fare_ugx or 0
         commission = int(final_fare * settings.PRICING_COMMISSION_PERCENT / 100)
